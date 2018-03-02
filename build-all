@@ -1,0 +1,4 @@
+#!/bin/sh
+for OS in linux darwin; do
+  GOOS=$OS go build -o mediastorm-$OS
+done
