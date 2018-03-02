@@ -2,12 +2,29 @@
 
 MediaStorm generates traffic to AWS Elemental MediaStore.
 
+Note: this is an unsupported personal tool.
+
 ## Building
+
+### The easier way
+
+Use `go get` to download and compile a binary:
+
+```
+go get -u github.com/rhcarvalho/mediastorm
+```
+
+### Alternative
+
+Alternatively, clone this repository and run:
 
 ```
 go get -u -d github.com/aws/aws-sdk-go
 go build
 ```
+
+Note: deliberately, there is no vendoring nor pinning of version of the AWS Go
+SDK dependency, nor intention to do so.
 
 ## Usage
 
