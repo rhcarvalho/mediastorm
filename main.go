@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -19,11 +20,12 @@ var (
 	// Required:
 	endpoint = flag.String("endpoint", "", "container endpoint (required)")
 	// Optional:
-	path  = flag.String("path", "mediastorm/"+strings.Replace(time.Now().UTC().Format(time.RFC3339Nano), ":", "-", -1), "path to write")
-	tps   = flag.Int("tps", 1, "PutObject TPS")
-	size  = flag.Int("size", 512, "content size to write (random bytes)")
-	count = flag.Int("n", 0, "number of requests to send, 0 means infinite")
-	debug = flag.Bool("debug", false, "enable SDK debugging of HTTP requests")
+	path     = flag.String("path", "mediastorm/"+strings.Replace(time.Now().UTC().Format(time.RFC3339Nano), ":", "-", -1), "path to write")
+	tps      = flag.Int("tps", 1, "PutObject TPS")
+	size     = flag.Int("size", 512, "content size to write (random bytes)")
+	count    = flag.Int("n", 0, "number of requests to send, 0 means infinite")
+	debug    = flag.Bool("debug", false, "enable SDK debugging of HTTP requests")
+	poolsize = flag.Int("poolsize", http.DefaultMaxIdleConnsPerHost, "connection pool size")
 )
 
 func main() {
@@ -36,8 +38,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	tr := &http.Transport{
+		MaxIdleConnsPerHost: *poolsize,
+		IdleConnTimeout:     30 * time.Second,
+	}
+	client := &http.Client{Transport: tr}
+
 	cfg := aws.NewConfig().
 		WithEndpoint(*endpoint).
+		WithHTTPClient(client).
 		WithCredentialsChainVerboseErrors(true)
 	if *debug {
 		// Enable relevant debugging flags. See aws.LogDebug* for more.
