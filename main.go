@@ -3,28 +3,30 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/tls"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
-
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/mediastoredata"
 )
 
 var (
 	// Required:
 	endpoint = flag.String("endpoint", "", "container endpoint (required)")
+	host     = flag.String("host", "", "HTTP host header, if different than endpoint")
+	insecure = flag.Bool("insecure", false, "ignore server certificate")
 	// Optional:
-	path     = flag.String("path", "mediastorm/"+strings.Replace(time.Now().UTC().Format(time.RFC3339Nano), ":", "-", -1), "path to write")
-	tps      = flag.Int("tps", 1, "PutObject TPS")
-	size     = flag.Int("size", 512, "content size to write (random bytes)")
-	count    = flag.Int("n", 0, "number of requests to send, 0 means infinite")
-	debug    = flag.Bool("debug", false, "enable SDK debugging of HTTP requests")
+	path  = flag.String("path", "mediastorm/"+strings.Replace(time.Now().UTC().Format(time.RFC3339Nano), ":", "-", -1), "path to write")
+	tps   = flag.Int("tps", 1, "PutObject TPS")
+	size  = flag.Int("size", 512, "content size to write (random bytes)")
+	count = flag.Int("n", 0, "number of requests to send, 0 means infinite")
+	// debug    = flag.Bool("debug", false, "enable SDK debugging of HTTP requests")
 	poolsize = flag.Int("poolsize", http.DefaultMaxIdleConnsPerHost, "connection pool size")
 )
 
@@ -42,35 +44,14 @@ func main() {
 		MaxIdleConnsPerHost: *poolsize,
 		IdleConnTimeout:     30 * time.Second,
 	}
+	if *insecure {
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
 	client := &http.Client{Transport: tr}
-
-	cfg := aws.NewConfig().
-		WithEndpoint(*endpoint).
-		WithHTTPClient(client).
-		WithCredentialsChainVerboseErrors(true)
-	if *debug {
-		// Enable relevant debugging flags. See aws.LogDebug* for more.
-		cfg.WithLogLevel(aws.LogDebugWithRequestRetries | aws.LogDebugWithRequestErrors)
-	}
-	s := session.Must(session.NewSession(cfg))
-
-	_, err := s.Config.Credentials.Get()
-	if err != nil {
-		log.Fatalf("AWS credentials: %v", err)
-	}
-	if aws.StringValue(s.Config.Region) == "" {
-		log.Fatal("AWS region is not defined. Set the AWS_REGION environment variable or relevant config files.")
-	}
-
-	msd := mediastoredata.New(s)
 
 	buf := make([]byte, *size)
 	if _, err := rand.Read(buf); err != nil {
 		log.Fatal(err)
-	}
-	input := &mediastoredata.PutObjectInput{
-		Body: bytes.NewReader(buf),
-		Path: path,
 	}
 
 	log.Printf("MediaStorm: PutObject %s (%d B) @ %d TPS", *path, *size, *tps)
@@ -78,15 +59,54 @@ func main() {
 	interval := time.Duration(int(time.Second) / *tps)
 	timer := time.NewTicker(interval)
 	defer timer.Stop()
-	for i := 1; *count == 0 || i <= *count; i++ {
-		req, output := msd.PutObjectRequest(input)
-		req.HTTPRequest.Header.Set("User-Agent", "MediaStorm")
-		req.HTTPRequest.Header.Set("X-Request-ID", fmt.Sprint(i))
-		err := req.Send()
-		if err != nil {
-			log.Printf("[ERROR] PutObject: %v", err)
+
+	start := time.Now()
+	sent := new(int64)
+
+	go func() {
+		for {
+			total := atomic.LoadInt64(sent)
+			fmt.Printf("=> @ %.1f TPS\n", float64(total)/time.Since(start).Seconds())
+			time.Sleep(5 * time.Second)
 		}
-		log.Printf("[INFO] %v", output)
+	}()
+
+	var wg sync.WaitGroup
+
+	for i := 1; *count == 0 || i <= *count; i++ {
+		wg.Add(1)
+		go func() {
+			start := time.Now().UTC()
+			defer func() {
+				end := time.Now().UTC()
+				fmt.Println("METRICS", start.Unix(), float64(end.Sub(start).Nanoseconds())/float64(time.Millisecond), start, end)
+			}()
+			defer wg.Done()
+			req, err := http.NewRequest("PUT", *endpoint+"/"+*path, bytes.NewReader(buf))
+			if err != nil {
+				log.Printf("[ERROR] NewRequest: %v", err)
+				return
+			}
+			if *host != "" {
+				req.Host = *host
+			}
+			req.Header.Set("User-Agent", "MediaStorm")
+			req.Header.Set("X-Request-ID", fmt.Sprint(i))
+			resp, err := client.Do(req)
+			if err != nil {
+				log.Printf("[ERROR] PutObject: %v", err)
+				return
+			}
+			defer resp.Body.Close()
+			b, err := ioutil.ReadAll(resp.Body)
+			if err != nil {
+				log.Printf("[ERROR] Reading Response: %v", err)
+				return
+			}
+			log.Printf("[INFO] %d :: %s", resp.StatusCode, b)
+			atomic.AddInt64(sent, 1)
+		}()
 		<-timer.C
 	}
+	wg.Wait()
 }
